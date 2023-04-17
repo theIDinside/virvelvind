@@ -3,28 +3,18 @@
 This repo is to complete the fun challenges found at [fly.io's maelstrom challenges](https://fly.io/dist-sys/)
 
 
-### Formats of the Response and Request types
+### Formats of the Message types
+
+Example of the `EchoServiceDefinition` which are called `Definition` due to this being the type
+that represents what kind of protocol or message payloads it's dealing in. If it's not defined
+here, the node is going to crash when attempting to serialize input; i.e. it doesn't protect itself
+from faulty input; Maelstrom is not going to send it any.
 
 ```rust
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")] // make enum "internally tagged"
-pub enum RequestType {
-    #[serde(rename = "init")]
-    Init {
-        node_id: crate::Id,
-        node_ids: Vec<crate::Id>,
-    },
-
-    #[serde(rename = "echo")]
+#[serde(tag = "type", rename_all = "snake_case")] // make enum "internally tagged"
+pub enum EchoServiceDefinition {
     Echo { echo: String },
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")] // make enum "internally tagged"
-pub enum ResponseType {
-    #[serde(rename = "init_ok")]
-    InitOk,
-    #[serde(rename = "echo_ok")]
     EchoOk { echo: String },
 }
 ```
