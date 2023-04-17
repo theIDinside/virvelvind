@@ -2,7 +2,8 @@
 members = [
   "virvelvind",
   "echo",
-  "unique_ids"
+  "unique_ids",
+  "broadcast"
 ]
 
 [workspace.dependencies]
