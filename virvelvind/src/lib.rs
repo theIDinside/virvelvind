@@ -8,7 +8,7 @@ use res::{MaelstromResponse, ResponseBody};
 
 pub use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-type NetworkEntityId = String;
+pub use String as NetworkEntityId;
 
 // Re-export it all to consumer
 pub mod prelude {
