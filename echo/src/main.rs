@@ -1,8 +1,11 @@
-
-use virvelvind::{requests::{self, Initialize, MaelstromRequest, RequestBody}, Node, Serialize, Deserialize, response::{MaelstromResponse, ResponseBody}};
+use virvelvind::{
+    requests::{Initialize, MaelstromRequest},
+    response::{MaelstromResponse, ResponseBody},
+    Deserialize, Node, Serialize,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all="snake_case")] // make enum "internally tagged"
+#[serde(tag = "type", rename_all = "snake_case")] // make enum "internally tagged"
 pub enum EchoServiceDefinition {
     Echo { echo: String },
     EchoOk { echo: String },
@@ -36,13 +39,16 @@ impl Echo {
                     in_reply_to: msg.body.msg_id,
                 },
             }),
-            unexpected @ _ => Err(format!("Should not receive {unexpected:?}"))
+            unexpected @ _ => Err(format!("Should not receive {unexpected:?}")),
         }
     }
 }
 
 impl Node<EchoServiceDefinition> for Echo {
-    fn process(&mut self, msg: MaelstromRequest<EchoServiceDefinition>) -> Result<MaelstromResponse<EchoServiceDefinition>, String> {
+    fn process(
+        &mut self,
+        msg: MaelstromRequest<EchoServiceDefinition>,
+    ) -> Result<MaelstromResponse<EchoServiceDefinition>, String> {
         self.handle_request(msg)
     }
 

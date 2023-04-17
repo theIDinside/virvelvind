@@ -1,5 +1,20 @@
 use std::io::{BufRead, BufReader, StdoutLock, Write};
+// rename
+pub use requests as req;
+pub use response as res;
+
+use req::Initialize;
+use res::{MaelstromResponse, ResponseBody};
+
+pub use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
 type NetworkEntityId = String;
+
+// Re-export it all to consumer
+pub mod prelude {
+  pub use crate::req::*;
+  pub use crate::res::*;
+}
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")] // make enum "internally tagged"
@@ -59,11 +74,6 @@ pub mod response {
         pub body: ResponseBody<ServiceType>,
     }
 }
-
-use requests::{self as req, Initialize};
-use res::{MaelstromResponse, ResponseBody};
-use response as res;
-pub use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub trait Node<ServiceType>
 where
