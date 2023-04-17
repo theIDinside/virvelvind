@@ -132,6 +132,10 @@ where
     })?;
     node.init(init.body.data);
 
+    if node.is_initialized() {
+      panic!("Node initialized with faulty settings");
+    }
+
     let init_respose_ = init_response(init.body.msg_id, 1, init.dest, init.src);
     let msg =
         serde_json::to_string(&init_respose_).map_err(|_| "Failed to serialize init resposne")?;
