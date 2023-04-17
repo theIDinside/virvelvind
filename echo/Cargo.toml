@@ -7,3 +7,5 @@ edition = "2021"
 
 [dependencies]
 virvelvind = { path = "../virvelvind" }
+serde = { workspace = true }
+serde_json = { workspace = true }
