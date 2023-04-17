@@ -10,10 +10,16 @@ use vv::{
 };
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct Id<T> {
+    id: T,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")] // make enum "internally tagged"
 pub enum UniqueIdGenerationDefinition<T> {
     Generate,
-    GenerateOk { id: T },
+    // GenerateOk { id: T },
+    GenerateOk(Id<T>),
 }
 
 /// This is a very simple and stupid (and easy to break in production)
@@ -34,12 +40,14 @@ impl UniqueIdServiceNode {
     }
 
     // free standing 'static' member function
-    pub fn generate_id(node_id: &str) -> String {
+    pub fn generate_id(node_id: &str) -> Id<String> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_micros();
-        format!("{node_id}@{now:X}")
+        Id {
+            id: format!("{node_id}@{now:X}"),
+        }
     }
 }
 
@@ -64,12 +72,13 @@ impl Node<UniqueIdGenerationDefinition<String>> for UniqueIdServiceNode {
               dest: msg.src,
               body: ResponseBody {
                   msg_id: local_msg_id,
-                  response_type: UniqueIdGenerationDefinition::GenerateOk { id: UniqueIdServiceNode::generate_id(&self.init.node_id) },
+                  // response_type: UniqueIdGenerationDefinition::GenerateOk { id: UniqueIdServiceNode::generate_id(&self.init.node_id) },
+                  response_type: UniqueIdGenerationDefinition::GenerateOk(UniqueIdServiceNode::generate_id(&self.init.node_id)),
                   in_reply_to: msg.body.msg_id,
               },
           })
           },
-          UniqueIdGenerationDefinition::GenerateOk { id } => Err(format!("We have been sent a GenerateOk response - we are not taking requests at this time {id}"))
+          UniqueIdGenerationDefinition::GenerateOk(Id { id }) => Err(format!("We have been sent a GenerateOk response - we are not taking requests at this time {id}"))
       }
     }
 }
