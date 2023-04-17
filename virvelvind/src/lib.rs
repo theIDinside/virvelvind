@@ -1,103 +1,154 @@
-use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader, StdoutLock, Write};
+type NetworkEntityId = String;
 
-type ClientId = String;
-type NodeId = String;
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")] // make enum "internally tagged"
-pub enum RequestType {
-    #[serde(rename = "init")]
-    Init {
-        node_id: NodeId,
-        node_ids: Vec<NodeId>,
-    },
-
-    #[serde(rename = "echo")]
-    Echo { echo: String },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")] // make enum "internally tagged"
-pub enum ResponseType {
-    #[serde(rename = "init_ok")]
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")] // make enum "internally tagged"
+enum MaelstromService {
     InitOk,
-    #[serde(rename = "echo_ok")]
-    EchoOk { echo: String },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RequestBody {
-    #[serde(flatten)]
-    pub request_type: RequestType,
-    pub msg_id: usize,
+pub mod requests {
+    use crate::NetworkEntityId;
+    use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+    #[derive(Deserialize, Serialize, Default)]
+    pub struct Initialize {
+        pub node_id: NetworkEntityId,
+        pub node_ids: Vec<NetworkEntityId>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct RequestBody<ServiceRequestType> {
+        #[serde(flatten)]
+        pub data: ServiceRequestType,
+        pub msg_id: usize,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct MaelstromRequest<ServiceRequestType> {
+        pub src: NetworkEntityId,
+        pub dest: NetworkEntityId,
+        pub body: RequestBody<ServiceRequestType>,
+    }
+
+    pub fn parse_request<'a, S: DeserializeOwned>(
+        input: &'a str,
+    ) -> Result<MaelstromRequest<S>, serde_json::Error> {
+        serde_json::from_str(input.trim()).map_err(|e| {
+            eprintln!("errored on input: '{input}'");
+            e
+        })
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ResponseBody {
-    pub msg_id: usize,
-    #[serde(flatten)]
-    pub response_type: ResponseType,
-    pub in_reply_to: usize,
+pub mod response {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct ResponseBody<ServiceResponseType> {
+        pub msg_id: usize,
+        #[serde(flatten)]
+        pub response_type: ServiceResponseType,
+        pub in_reply_to: usize,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct MaelstromResponse<ServiceType> {
+        pub src: crate::NetworkEntityId,
+        pub dest: crate::NetworkEntityId,
+        pub body: ResponseBody<ServiceType>,
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RequestMessage {
-    pub id: usize,
-    pub src: ClientId,
-    pub dest: NodeId,
-    pub body: RequestBody,
+use requests::{self as req, Initialize};
+use res::{MaelstromResponse, ResponseBody};
+use response as res;
+pub use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+pub trait Node<ServiceType>
+where
+    ServiceType: DeserializeOwned + Serialize,
+{
+    fn init(&mut self, init: Initialize);
+    fn get_init(&self) -> &Initialize;
+
+    fn is_initialized(&self) -> bool {
+      let init = self.get_init();
+      let default_init = Initialize::default();
+      default_init.node_id != init.node_id
+    }
+    fn process(
+        &mut self,
+        msg: req::MaelstromRequest<ServiceType>,
+    ) -> Result<res::MaelstromResponse<ServiceType>, String>;
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ResponseMessage {
-    pub src: NodeId,
-    pub dest: ClientId,
-    pub body: ResponseBody,
-}
-
-#[derive(Debug)]
-pub struct RequestError<'a> {
-    pub serde_erron: serde_json::Error,
-    pub contents: &'a str,
-}
-
-pub trait Node {
-    type ProcessingResult;
-    type RegisterResult;
-    fn register_as(&mut self, node_id: &str) -> Self::RegisterResult;
-    fn process(&mut self, msg: RequestMessage) -> Self::ProcessingResult;
-}
-
-pub fn parse_request<'a>(input: &'a str) -> Result<RequestMessage, RequestError<'a>> {
-    serde_json::from_str(input.trim()).map_err(|e| {
-        eprintln!("errored on input: '{input}'");
-        RequestError {
-            serde_erron: e,
-            contents: input,
-        }
-    })
-}
-
-pub fn prepare_response(msg: &ResponseMessage) -> Result<String, serde_json::Error> {
+pub fn prepare_response<ServiceType: serde::Serialize>(
+    msg: &res::MaelstromResponse<ServiceType>,
+) -> Result<String, serde_json::Error> {
     serde_json::to_string(msg)
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::{RequestBody, RequestMessage};
+fn init_response(
+    in_reply_to: usize,
+    msg_id: usize,
+    src: String,
+    dest: String,
+) -> MaelstromResponse<MaelstromService> {
+    MaelstromResponse {
+        src: src,
+        dest: dest,
+        body: ResponseBody {
+            msg_id,
+            response_type: MaelstromService::InitOk,
+            in_reply_to,
+        },
+    }
+}
 
-    #[test]
-    fn serialize() -> Result<(), serde_json::Error> {
-        let request = RequestMessage {
-            body: RequestBody {
-                msg_id: 1,
-                request_type: crate::RequestType::Echo { echo: "foo".into() },
-            },
-            dest: "n1".into(),
-            src: "c1".into(),
-        };
-        let ser = serde_json::to_string(&request)?;
-        println!("ser: {ser}");
-        Ok(())
+pub fn start_maelstrom_service_node<N, ServiceType>(mut node: N) -> Result<(), String>
+where
+    N: Node<ServiceType>,
+    ServiceType: Serialize + DeserializeOwned,
+{
+    let mut stdin = std::io::stdin().lock();
+    let mut buf = String::with_capacity(512);
+    stdin
+        .read_line(&mut buf)
+        .map_err(|_| "Failed to read init packet")?;
+    eprintln!("first packet: {}", &buf);
+    let init: req::MaelstromRequest<Initialize> = serde_json::from_str(&buf).map_err(|e| {
+        format!("Init request always required but failed to parse: {e}. Contents: {buf}")
+    })?;
+    node.init(init.body.data);
+
+    let init_respose_ = init_response(init.body.msg_id, 1, init.dest, init.src);
+    let msg =
+        serde_json::to_string(&init_respose_).map_err(|_| "Failed to serialize init resposne")?;
+    let mut stdout: StdoutLock = std::io::stdout().lock();
+    stdout
+        .write(msg.as_bytes())
+        .expect("Failed to send init response");
+    stdout.write_all(b"\n").expect("newline");
+
+    let mut reader = BufReader::new(stdin);
+    loop {
+        buf.clear();
+        reader.read_line(&mut buf).expect("Failed to read input");
+        let req: req::MaelstromRequest<ServiceType> =
+            req::parse_request(&buf).map_err(|e| format!("Failed to parse request: {e:?}"))?;
+        match node.process(req) {
+            Err(err) => {
+                eprintln!("failed to process message {err}")
+            }
+            Ok(response) => {
+                let contents =
+                    serde_json::to_string(&response).map_err(|_| "Couldn't serialize message")?;
+                stdout
+                    .write(contents.as_bytes())
+                    .expect("Failed to write response");
+                stdout.write_all(b"\n").expect("Failed to write newline");
+            }
+        }
     }
 }
