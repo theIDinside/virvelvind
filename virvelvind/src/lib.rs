@@ -90,6 +90,7 @@ where
     fn process_message(
         &mut self,
         msg: req::MaelstromRequest<ServiceType>,
+        local_msg_id: usize,
     ) -> Result<res::MaelstromResponse<ServiceType>, String>;
 }
 
@@ -132,9 +133,10 @@ where
     })?;
     node.init(init.body.data);
 
-    if node.is_initialized() {
+    if !node.is_initialized() {
       panic!("Node initialized with faulty settings");
     }
+
 
     let init_respose_ = init_response(init.body.msg_id, 1, init.dest, init.src);
     let msg =
@@ -143,15 +145,16 @@ where
     stdout
         .write(msg.as_bytes())
         .expect("Failed to send init response");
-    stdout.write_all(b"\n").expect("newline");
+    stdout.write_all(b"\n");
 
     let mut reader = BufReader::new(stdin);
+    let mut msg_id = 2..usize::MAX;
     loop {
         buf.clear();
         reader.read_line(&mut buf).expect("Failed to read input");
         let req: req::MaelstromRequest<ServiceType> =
             req::parse_request(&buf).map_err(|e| format!("Failed to parse request: {e:?}"))?;
-        match node.process_message(req) {
+        match node.process_message(req, msg_id.next().expect("Ran out of message id's")) {
             Err(err) => {
                 eprintln!("failed to process message {err}")
             }
