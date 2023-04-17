@@ -87,7 +87,7 @@ where
       let default_init = Initialize::default();
       default_init.node_id != init.node_id
     }
-    fn process(
+    fn process_message(
         &mut self,
         msg: req::MaelstromRequest<ServiceType>,
     ) -> Result<res::MaelstromResponse<ServiceType>, String>;
@@ -147,7 +147,7 @@ where
         reader.read_line(&mut buf).expect("Failed to read input");
         let req: req::MaelstromRequest<ServiceType> =
             req::parse_request(&buf).map_err(|e| format!("Failed to parse request: {e:?}"))?;
-        match node.process(req) {
+        match node.process_message(req) {
             Err(err) => {
                 eprintln!("failed to process message {err}")
             }
