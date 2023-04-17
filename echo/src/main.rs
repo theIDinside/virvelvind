@@ -45,7 +45,7 @@ impl EchoServiceNode {
 }
 
 impl Node<EchoServiceDefinition> for EchoServiceNode {
-    fn process(
+    fn process_message(
         &mut self,
         msg: MaelstromRequest<EchoServiceDefinition>,
     ) -> Result<MaelstromResponse<EchoServiceDefinition>, String> {
