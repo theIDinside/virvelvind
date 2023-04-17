@@ -11,12 +11,12 @@ pub enum EchoServiceDefinition {
     EchoOk { echo: String },
 }
 
-pub struct Echo {
+pub struct EchoServiceNode {
     init: Initialize,
     local_txn_id: usize,
 }
 
-impl Echo {
+impl EchoServiceNode {
     pub fn new() -> Self {
         Self {
             local_txn_id: 1,
@@ -44,7 +44,7 @@ impl Echo {
     }
 }
 
-impl Node<EchoServiceDefinition> for Echo {
+impl Node<EchoServiceDefinition> for EchoServiceNode {
     fn process(
         &mut self,
         msg: MaelstromRequest<EchoServiceDefinition>,
@@ -62,5 +62,5 @@ impl Node<EchoServiceDefinition> for Echo {
 }
 
 fn main() -> Result<(), String> {
-    virvelvind::start_maelstrom_service_node(Echo::new())
+    virvelvind::start_maelstrom_service_node(EchoServiceNode::new())
 }
