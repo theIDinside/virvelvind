@@ -97,6 +97,12 @@ pub mod response {
     pub response_type: ServiceResponseType,
   }
 
+  impl<ServiceResponseType> ResponseBody<ServiceResponseType> {
+    pub fn uni_dir(response_type: ServiceResponseType) -> ResponseBody<ServiceResponseType> {
+      ResponseBody { in_reply_to: None, msg_id: None, response_type }
+    }
+  }
+
   #[derive(Debug, Serialize, Deserialize)]
   pub struct MaelstromResponse<ServiceType> {
     pub src: crate::NetworkEntityId,
