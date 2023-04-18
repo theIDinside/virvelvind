@@ -27,7 +27,7 @@ impl EchoServiceNode {
         src: self.init.node_id.clone(),
         dest: msg.src,
         body: ResponseBody {
-          msg_id: msg_id,
+          msg_id: Some(msg_id),
           response_type: EchoServiceDefinition::EchoOk { echo: echo },
           in_reply_to: msg.body.msg_id,
         },

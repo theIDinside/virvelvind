@@ -71,7 +71,7 @@ impl Node<UniqueIdGenerationDefinition<String>> for UniqueIdServiceNode {
           src: self.init.node_id.clone(),
           dest: msg.src,
           body: ResponseBody {
-            msg_id: local_msg_id,
+            msg_id: Some(local_msg_id),
             // response_type: UniqueIdGenerationDefinition::GenerateOk { id: UniqueIdServiceNode::generate_id(&self.init.node_id) },
             response_type: UniqueIdGenerationDefinition::GenerateOk(
               UniqueIdServiceNode::generate_id(&self.init.node_id),

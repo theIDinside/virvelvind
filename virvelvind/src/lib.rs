@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, StdoutLock, Write};
+use std::io::{BufRead, BufReader, StdinLock, StdoutLock, Write};
 // rename
 pub use requests as req;
 pub use response as res;
@@ -36,7 +36,8 @@ pub mod requests {
   pub struct RequestBody<ServiceRequestType> {
     #[serde(flatten)]
     pub data: ServiceRequestType,
-    pub msg_id: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msg_id: Option<usize>,
   }
 
   #[derive(Debug, Deserialize, Serialize)]
@@ -61,13 +62,15 @@ pub mod response {
 
   #[derive(Debug, Serialize, Deserialize)]
   pub struct ResponseBody<ServiceResponseType> {
-    pub msg_id: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msg_id: Option<usize>,
     #[serde(flatten)]
     pub response_type: ServiceResponseType,
-    pub in_reply_to: usize,
   }
 
-  #[derive(Debug, Serialize)]
+  #[derive(Debug, Serialize, Deserialize)]
   pub struct MaelstromResponse<ServiceType> {
     pub src: crate::NetworkEntityId,
     pub dest: crate::NetworkEntityId,
