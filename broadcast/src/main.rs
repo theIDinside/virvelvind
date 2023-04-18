@@ -1,6 +1,7 @@
 use std::{
   collections::{HashMap, HashSet},
   io::StdoutLock,
+  time::UNIX_EPOCH,
 };
 use virvelvind as vv;
 use vv::{
@@ -10,7 +11,7 @@ use vv::{
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RPCRead {
-  messages: HashSet<usize>,
+  messages: Vec<usize>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -37,35 +38,103 @@ pub enum BroadcastServiceDefinition {
   Topology(Topology),
   TopologyOk,
 
-  Gossip { news: HashSet<usize> },
+  Gossip { news: Vec<GossipMessage> },
+  GossipReceipt { receipt: Vec<BatchId> },
 }
 
+type GossipPayload = HashSet<usize>;
+type BatchId = usize;
+type OtherNodeBatchId = usize;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct GossipMessage {
+  id: BatchId,
+  payload: GossipPayload,
+}
+
+// This design is meant to be made generic; or rather, reused with minor modifications
+// so that if the data that's being sent
+// is larger than a usize (let's say, it could be half a MB), then we don't
+// want to send "acknowledged" gossip messages, containing the seen items (as it would gain in size fast), but instead a representation of it
+// by using ID's, and in this case, we group messages together by batch ID:s.
 #[derive(Default)]
 pub struct BroadcastServiceNode {
   init: Initialize,
-  gossiped: HashSet<usize>,
-  news: HashSet<usize>,
-  _neighbors: Vec<vv::NetworkEntityId>,
+  // the current gossip batch that's being produced
+  current_new_message_state: HashSet<usize>,
+  // all gossip batches that has been produced (and sent), as a mapping of BatchId -> MessageBatch
+  message_batches: HashMap<BatchId, HashSet<usize>>,
+  // mapping of Node -> received batches ID's (these batches represent the batches produced on _source_ node, not this one)
+  received_batches: HashMap<String, HashSet<OtherNodeBatchId>>,
+  // mapping of node id -> ACK'd gossip batch ID's, so that we know what batche(s) node N has received
+  acknowledged_sent_batches: HashMap<String, HashSet<BatchId>>,
+  // neighboring nodes
+  neighbors: Vec<vv::NetworkEntityId>,
 }
 
 impl BroadcastServiceNode {
-  /// Returns a set of previously not sent values
-  /// This way, at least this node can assume that all it's neighbors knows _this_ node's values
-  pub fn gossip_news(&mut self) -> HashSet<usize> {
-    // news_to_gossip_about = values in that are in `news` _AND NOT_ in `gossiped`
-    let news_to_gossip_about: HashSet<usize> =
-      self.news.difference(&self.gossiped).map(|x| *x).collect();
-    self.gossiped.extend(&news_to_gossip_about);
-    news_to_gossip_about
+  pub fn has_seen(&self, value: usize) -> bool {
+    for v in self.message_batches.values().flat_map(|s| s.iter()) {
+      if value == *v {
+        return true;
+      }
+    }
+    for v in self.current_new_message_state.iter() {
+      if value == *v {
+        return true;
+      }
+    }
+    return false;
   }
 
-  pub fn received_broadcast_messages(&self) -> HashSet<usize> {
-    self
-      .gossiped
-      .iter()
-      .chain(self.news.iter())
-      .copied()
-      .collect()
+  pub fn get_unknown(&mut self, node: &String) -> Vec<GossipMessage> {
+    if !self.current_new_message_state.is_empty() {
+      let new_id = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("")
+        .as_micros() as usize;
+      let mut swap = HashSet::default();
+      std::mem::swap(&mut swap, &mut self.current_new_message_state);
+      self.message_batches.insert(new_id, swap);
+      assert!(self.current_new_message_state.is_empty(), "Should be empty here!");
+    }
+    let known_ids = self.acknowledged_sent_batches.get(node).expect("failed");
+    let res = self
+      .message_batches
+      .keys()
+      .filter_map(|id| {
+        if !known_ids.contains(id) {
+          Some(GossipMessage {
+            id: *id,
+            payload: self.message_batches.get(id)?.clone(),
+          })
+        } else {
+          None
+        }
+      })
+      .collect();
+
+    res
+  }
+
+  /// Constructs all messages that this node has seen, by iterating over all produced batches (as well as the one being currently built in `current_new_message_state`)
+  pub fn all_messages(&self) -> Vec<usize> {
+    let total_msg_cnt = self
+      .message_batches
+      .values()
+      .fold(0, |msg_count, set| set.len() + msg_count)
+      + self.current_new_message_state.len();
+
+    let mut preallocated = Vec::with_capacity(total_msg_cnt);
+    for msg in self
+      .message_batches
+      .values()
+      .flat_map(|set| set)
+      .chain(self.current_new_message_state.iter())
+    {
+      preallocated.push(*msg);
+    }
+    preallocated
   }
 }
 
@@ -93,7 +162,7 @@ impl CooperativeNode<BroadcastServiceDefinition> for BroadcastServiceNode {
     tx: std::sync::mpsc::Sender<vv::Event<BroadcastServiceDefinition>>,
   ) -> Option<std::thread::JoinHandle<()>> {
     Some(std::thread::spawn(move || loop {
-      std::thread::sleep(std::time::Duration::from_millis(500));
+      std::thread::sleep(std::time::Duration::from_millis(12));
       match tx.send(Event::GossipEvent) {
         Ok(_) => {}
         Err(err) => {
@@ -114,7 +183,7 @@ impl CooperativeNode<BroadcastServiceDefinition> for BroadcastServiceNode {
       Event::IOEvent(msg) => {
         match msg.body.data {
         BroadcastServiceDefinition::Broadcast { message } => {
-          self.news.insert(message);
+          self.current_new_message_state.insert(message);
           MaelstromResponse {
             src: self.init.node_id.clone(),
             dest: msg.src,
@@ -126,7 +195,7 @@ impl CooperativeNode<BroadcastServiceDefinition> for BroadcastServiceNode {
           }.take_send(stdout).expect("could not send broadcast ok ok");
         },
         BroadcastServiceDefinition::Read => {
-          let seen = self.received_broadcast_messages();
+          let seen = self.all_messages();
           MaelstromResponse {
             src: self.init.node_id.clone(),
             dest: msg.src,
@@ -138,7 +207,14 @@ impl CooperativeNode<BroadcastServiceDefinition> for BroadcastServiceNode {
           }.take_send(stdout).expect("could not send read ok");
         },
         BroadcastServiceDefinition::Topology(Topology { mut topology }) => {
-          self._neighbors = topology.remove(&self.init.node_id).expect("Did not find topology data for this node in this request");
+          let nbs = topology.remove(&self.init.node_id).expect("Did not find topology data for this node in this request");
+          for nb in nbs.iter().cloned() {
+            self.acknowledged_sent_batches.insert(nb.clone(), Default::default());
+            self.received_batches.insert(nb, Default::default());
+          }
+
+          self.neighbors = nbs;
+
           MaelstromResponse {
             src: self.init.node_id.clone(),
             dest: msg.src,
@@ -150,28 +226,46 @@ impl CooperativeNode<BroadcastServiceDefinition> for BroadcastServiceNode {
           }.take_send(stdout).expect("could not send topology ok");
         },
         BroadcastServiceDefinition::Gossip { news } => {
-          self.news.extend(news);
+          let mut receipts = vec![];
+          for batch in news {
+            receipts.push(batch.id);
+            if !self.received_batches.get(&msg.src).unwrap().contains(&batch.id) {
+              for value in batch.payload {
+                if !self.has_seen(value) {
+                  self.current_new_message_state.insert(value);
+                }
+              }
+              self.received_batches.get_mut(&msg.src).unwrap().insert(batch.id);
+            }
+          }
+
+          MaelstromResponse {
+            src: self.init.node_id.clone(),
+            dest: msg.src,
+            body: vv::res::ResponseBody::uni_dir(BroadcastServiceDefinition::GossipReceipt { receipt: receipts })
+          }.take_send(stdout).expect("Failed to send receipt");
+        },
+        BroadcastServiceDefinition::GossipReceipt { receipt } => {
+          for id in receipt {
+            self.acknowledged_sent_batches.get_mut(&msg.src).unwrap().insert(id);
+          }
         },
         BroadcastServiceDefinition::TopologyOk // these events should not be sent or received by nodes
         | BroadcastServiceDefinition::ReadOk(_)
         | BroadcastServiceDefinition::BroadcastOk => panic!("should never receive these messages"),
+
       }
       }
       Event::GossipEvent => {
-        let news = self.gossip_news();
-        if !news.is_empty() {
-          let mut msg = MaelstromResponse {
-            src: self.init.node_id.clone(),
-            dest: "".into(),
-            body: vv::res::ResponseBody {
-              in_reply_to: None,
-              msg_id: None,
-              response_type: BroadcastServiceDefinition::Gossip { news: news.clone() },
-            },
-          };
-          for n in self._neighbors.iter().cloned() {
-            msg.dest = n;
-            msg.send_ref(stdout).expect("Couldn't send message");
+        let nodes: Vec<_> = self.neighbors.iter().cloned().collect();
+        for n in nodes {
+          let news = self.get_unknown(&n);
+          if !news.is_empty() {
+            MaelstromResponse {
+              src: self.init.node_id.clone(),
+              dest: n,
+              body: vv::res::ResponseBody::uni_dir(BroadcastServiceDefinition::Gossip { news: news })
+            }.take_send(stdout).expect("failed to send gossip event");
           }
         }
       }
