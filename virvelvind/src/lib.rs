@@ -1,6 +1,7 @@
-use std::io::{BufRead, BufReader, StdoutLock, Write};
+use std::io::{BufRead, BufReader, StdinLock, StdoutLock, Write};
 // rename
 pub use requests as req;
+use requests::MaelstromRequest;
 pub use response as res;
 
 use req::Initialize;
@@ -23,7 +24,10 @@ enum MaelstromService {
 }
 
 pub mod requests {
-  use crate::NetworkEntityId;
+  use crate::{
+    res::{MaelstromResponse, ResponseBody},
+    NetworkEntityId,
+  };
   use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
   #[derive(Deserialize, Serialize, Default)]
@@ -36,7 +40,18 @@ pub mod requests {
   pub struct RequestBody<ServiceRequestType> {
     #[serde(flatten)]
     pub data: ServiceRequestType,
-    pub msg_id: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msg_id: Option<usize>,
+  }
+
+  impl<ServiceRequestType> RequestBody<ServiceRequestType> {
+    pub fn into_response(self, msg_id: Option<usize>) -> ResponseBody<ServiceRequestType> {
+      ResponseBody {
+        in_reply_to: self.msg_id,
+        msg_id: msg_id,
+        response_type: self.data.into(),
+      }
+    }
   }
 
   #[derive(Debug, Deserialize, Serialize)]
@@ -54,6 +69,19 @@ pub mod requests {
       e
     })
   }
+
+  impl<ServiceRequestType> MaelstromRequest<ServiceRequestType> {
+    pub fn into_reply(
+      self,
+      msg_id: Option<usize>,
+    ) -> MaelstromResponse<ServiceRequestType> {
+      MaelstromResponse {
+        src: self.dest,
+        dest: self.src,
+        body: self.body.into_response(msg_id),
+      }
+    }
+  }
 }
 
 pub mod response {
@@ -61,17 +89,42 @@ pub mod response {
 
   #[derive(Debug, Serialize, Deserialize)]
   pub struct ResponseBody<ServiceResponseType> {
-    pub msg_id: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msg_id: Option<usize>,
     #[serde(flatten)]
     pub response_type: ServiceResponseType,
-    pub in_reply_to: usize,
   }
 
-  #[derive(Debug, Serialize)]
+  #[derive(Debug, Serialize, Deserialize)]
   pub struct MaelstromResponse<ServiceType> {
     pub src: crate::NetworkEntityId,
     pub dest: crate::NetworkEntityId,
     pub body: ResponseBody<ServiceType>,
+  }
+
+  impl<ServiceType> MaelstromResponse<ServiceType>
+  where
+    ServiceType: Serialize,
+  {
+    pub fn take_send<W: std::io::Write>(self, output: &mut W) -> Result<(), &'static str> {
+      let contents = serde_json::to_string(&self).map_err(|_| "Couldn't serialize message")?;
+      output
+        .write(contents.as_bytes())
+        .expect("Failed to write response");
+      output.write_all(b"\n").expect("Failed to write newline");
+      Ok(())
+    }
+
+    pub fn send_ref<W: std::io::Write>(&self, output: &mut W) -> Result<(), &'static str> {
+      let contents = serde_json::to_string(&self).map_err(|_| "Couldn't serialize message")?;
+      output
+        .write(contents.as_bytes())
+        .expect("Failed to write response");
+      output.write_all(b"\n").expect("Failed to write newline");
+      Ok(())
+    }
   }
 }
 
@@ -94,6 +147,33 @@ where
   ) -> Result<res::MaelstromResponse<ServiceType>, String>;
 }
 
+pub enum Event<ServiceType: Serialize + DeserializeOwned + Send> {
+  IOEvent(req::MaelstromRequest<ServiceType>),
+  GossipEvent,
+}
+
+pub trait GossipMessagePump<ServiceType>
+where
+ServiceType: Serialize + DeserializeOwned + Send + 'static,
+{
+  fn get_duration(&self) -> std::time::Duration;
+  fn tx(&self) -> std::sync::mpsc::Sender<Event<ServiceType>>;
+}
+
+pub trait CooperativeNode<ServiceType>: Node<ServiceType>
+where
+  ServiceType: DeserializeOwned + Serialize + Send,
+{
+  fn setup_sidechannel_thread(
+    &mut self,
+    _tx: std::sync::mpsc::Sender<Event<ServiceType>>,
+  ) -> Option<std::thread::JoinHandle<()>> {
+    None
+  }
+
+  fn process_event(&mut self, msg: Event<ServiceType>, local_msg_id: usize, comms: &mut StdoutLock);
+}
+
 pub fn prepare_response<ServiceType: serde::Serialize>(
   msg: &res::MaelstromResponse<ServiceType>,
 ) -> Result<String, serde_json::Error> {
@@ -110,10 +190,102 @@ fn init_response(
     src: src,
     dest: dest,
     body: ResponseBody {
-      msg_id,
+      msg_id: Some(msg_id),
       response_type: MaelstromService::InitOk,
-      in_reply_to,
+      in_reply_to: Some(in_reply_to),
     },
+  }
+}
+
+fn exit_threads<T1, T2>(
+  io: std::thread::JoinHandle<T1>,
+  gossip: Option<std::thread::JoinHandle<T2>>,
+) -> Result<(), String> {
+  io.join()
+    .map_err(|e| format!("IO Thread join failed. Cause:\n\t {e:#?}"))?;
+  let Some(gossip) = gossip else { return Ok(()) };
+  gossip
+    .join()
+    .map_err(|e| format!("Gossip thread join failed. Cause:\n\t {e:#?}"))?;
+  Ok(())
+}
+
+fn wait_for_init_and_respond(mut stdin: StdinLock) -> Result<Initialize, String> {
+  let mut buf = String::with_capacity(512);
+  stdin
+    .read_line(&mut buf)
+    .map_err(|_| "Failed to read init packet")?;
+  eprintln!("first packet: {}", &buf);
+  let init: req::MaelstromRequest<Initialize> = serde_json::from_str(&buf).map_err(|e| {
+    format!("Init request always required but failed to parse: {e}. Contents: {buf}")
+  })?;
+
+  let init_respose_ = init_response(
+    init.body.msg_id.expect("Init request ill-formed"),
+    1,
+    init.dest,
+    init.src,
+  );
+  let msg =
+    serde_json::to_string(&init_respose_).map_err(|_| "Failed to serialize init resposne")?;
+  let mut stdout: StdoutLock = std::io::stdout().lock();
+  stdout
+    .write(msg.as_bytes())
+    .expect("Failed to send init response");
+  stdout.write_all(b"\n").expect("");
+
+  Ok(init.body.data)
+}
+
+pub fn start_service<N, ServiceType>(mut node: N) -> Result<(), String>
+where
+  N: CooperativeNode<ServiceType>,
+  ServiceType: Serialize + DeserializeOwned + Send + 'static,
+{
+  let (tx, rx) = std::sync::mpsc::channel::<Event<ServiceType>>();
+
+  let init = wait_for_init_and_respond(std::io::stdin().lock())?;
+  node.init(init);
+
+  if !node.is_initialized() {
+    panic!("Node initialized with faulty settings");
+  }
+
+  let node_tx_ = tx.clone();
+  let gossip_thread = node.setup_sidechannel_thread(node_tx_);
+
+  let io_tx = tx.clone();
+  let input_notifier_thread = std::thread::spawn(move || -> Result<(), String> {
+    let stdin = std::io::stdin().lock();
+    let mut reader = BufReader::new(stdin);
+    let mut buf = String::with_capacity(512);
+    loop {
+      reader.read_line(&mut buf).expect("Failed to read input");
+      let req: req::MaelstromRequest<ServiceType> =
+        req::parse_request(&buf).map_err(|e| format!("Failed to parse request: {e:?}"))?;
+      io_tx
+        .send(Event::IOEvent(req))
+        .map_err(|e| format!("Failed to send IO Event {e:#}"))?;
+      buf.clear();
+    }
+  });
+
+  let mut stdout: StdoutLock = std::io::stdout().lock();
+  let mut msg_id = 2..usize::MAX;
+  loop {
+    match rx.recv() {
+      Ok(evt) => {
+        node.process_event(
+          evt,
+          msg_id.next().expect("failed to get new msg_id"),
+          &mut stdout,
+        );
+      }
+      Err(e) => {
+        exit_threads(input_notifier_thread, gossip_thread)?;
+        return Err(format!("Application Level Error: {e:#}"));
+      }
+    }
   }
 }
 
@@ -122,49 +294,24 @@ where
   N: Node<ServiceType>,
   ServiceType: Serialize + DeserializeOwned,
 {
-  let mut stdin = std::io::stdin().lock();
-  let mut buf = String::with_capacity(512);
-  stdin
-      .read_line(&mut buf)
-      .map_err(|_| "Failed to read init packet")?;
-  eprintln!("first packet: {}", &buf);
-  let init: req::MaelstromRequest<Initialize> = serde_json::from_str(&buf).map_err(|e| {
-    format!("Init request always required but failed to parse: {e}. Contents: {buf}")
-  })?;
-  node.init(init.body.data);
+  let init = wait_for_init_and_respond(std::io::stdin().lock())?;
+  node.init(init);
 
   if !node.is_initialized() {
     panic!("Node initialized with faulty settings");
   }
 
-  let init_respose_ = init_response(init.body.msg_id, 1, init.dest, init.src);
-  let msg =
-    serde_json::to_string(&init_respose_).map_err(|_| "Failed to serialize init resposne")?;
   let mut stdout: StdoutLock = std::io::stdout().lock();
-  stdout
-      .write(msg.as_bytes())
-      .expect("Failed to send init response");
-  stdout.write_all(b"\n");
-
-  let mut reader = BufReader::new(stdin);
+  let mut reader = BufReader::new(std::io::stdin().lock());
   let mut msg_id = 2..usize::MAX;
+  let mut buf = String::with_capacity(512);
   loop {
     buf.clear();
     reader.read_line(&mut buf).expect("Failed to read input");
     let req: req::MaelstromRequest<ServiceType> =
       req::parse_request(&buf).map_err(|e| format!("Failed to parse request: {e:?}"))?;
-    match node.process_message(req, msg_id.next().expect("Ran out of message id's")) {
-      Err(err) => {
-        eprintln!("failed to process message {err}")
-      }
-      Ok(response) => {
-        let contents =
-          serde_json::to_string(&response).map_err(|_| "Couldn't serialize message")?;
-        stdout
-          .write(contents.as_bytes())
-          .expect("Failed to write response");
-        stdout.write_all(b"\n").expect("Failed to write newline");
-      }
-    }
+    node
+      .process_message(req, msg_id.next().expect("Ran out of message id's"))?
+      .take_send(&mut stdout)?;
   }
 }
